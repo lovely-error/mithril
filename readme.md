@@ -8,7 +8,7 @@ So far computing 10 iterations of fib seqv in scratchpad mem shows this perf pro
 
 `Executed 260 instructions (117 nops) in 65 cycles (0 on gmem access)`
 
-Not very promissing so far
+Not very promissing...
 1. Loops have to not be sparse.
    1. 55% wasted EUs in fib code
    2. Need 4x EUs (or more!)
