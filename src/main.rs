@@ -1,82 +1,83 @@
 #![feature(generic_arg_infer)]
+
 use core::{mem::{size_of, size_of_val, transmute}, ptr::{addr_of, copy_nonoverlapping}};
 
-const N: u16 = 10;
+const N: u16 = 32;
 
 const _ : () = if N > (1 << 6) - 1 { panic!() };
 
 const PRG_FIB: [u16;44] = [
 
     // setup
-    Opcode::PUT as u16 | (0 << 5) | (1 << 10),
-    Opcode::PUT as u16 | (1 << 5) | (1 << 10),
-    Opcode::PUT as u16 | (2 << 5) | (0 << 10),
-    Opcode::PUT as u16 | (3 << 5) | (8 << 10),
+    Opcode::PUC as u16 | (0 << 5) | (1 << 10),
+    Opcode::PUC as u16 | (1 << 5) | (1 << 10),
+    Opcode::PUC as u16 | (2 << 5) | (0 << 10),
+    Opcode::PUC as u16 | (3 << 5) | (8 << 10),
 
-    Opcode::PUT as u16 | (6 << 5) | (N << 10),
-    Opcode::PUT as u16 | (7 << 5) | (1 << 10),
-    Opcode::PUT as u16 | (8 << 5) | (0 << 10),
-    Opcode::PUT as u16 | (10 << 5) | (8 << 10),
+    Opcode::PUC as u16 | (6 << 5) | (N << 10),
+    Opcode::PUC as u16 | (7 << 5) | (1 << 10),
+    Opcode::PUC as u16 | (8 << 5) | (0 << 10),
+    Opcode::PUC as u16 | (10 << 5) | (8 << 10),
 
-    Opcode::PUT as u16 | (11 << 5) | (12 << 10),
-    Opcode::PUT as u16 | (12 << 5) | (2 << 10),
-    Opcode::DN as _,
-    Opcode::DN as _,
+    Opcode::PUC as u16 | (11 << 5) | (12 << 10),
+    Opcode::PUC as u16 | (12 << 5) | (2 << 10),
+    Opcode::TMP_BSL as u16 | (10 << 5) | (12 << 10),
+    Opcode::DNO as _,
 
-    Opcode::BSL as u16 | (11 << 5) | (12 << 10),
-    Opcode::BSL as u16 | (10 << 5) | (12 << 10),
-    Opcode::DN as _,
-    Opcode::DN as _,
+    Opcode::TMP_BSL as u16 | (11 << 5) | (12 << 10),
+    Opcode::DNO as _,
+    Opcode::DNO as _,
+    Opcode::DNO as _,
 
-    // br1
+    // loop
     Opcode::STV as u16 | (0 << 5) | (2 << 10),
-    Opcode::DN as _,
-    Opcode::PUT as u16 | (4 << 5) | (8 << 10),
-    Opcode::BM as u16 | (6 << 5) | (7 << 10),
+    Opcode::PUC as u16 | (4 << 5) | (8 << 10),
+    Opcode::TMP_BM as u16 | (6 << 5) | (7 << 10),
+    Opcode::DNO as _,
 
-    Opcode::BS as u16 | (2 << 5) | (4 << 10),
-    Opcode::BS as u16 | (1 << 5) | (0 << 10),
-    Opcode::CP as u16 | (6 << 5) | (9 << 10),
-    Opcode::DN as _,
+    Opcode::TMP_BS as u16 | (2 << 5) | (4 << 10),
+    Opcode::TMP_BS as u16 | (1 << 5) | (0 << 10),
+    Opcode::CPY as u16 | (6 << 5) | (9 << 10),
+    Opcode::CPY as u16 | (0 << 5) | (5 << 10),
 
-    Opcode::CP as u16 | (0 << 5) | (5 << 10),
-    Opcode::BET as u16 | (9 << 5) | (8 << 10),
-    Opcode::DN as _,
-    Opcode::DN as _,
+    Opcode::TMP_BET as u16 | (9 << 5) | (8 << 10),
+    Opcode::CPY as u16 | (1 << 5) | (0 << 10),
+    Opcode::DNO as _,
+    Opcode::DNO as _,
 
-    Opcode::CP as u16 | (1 << 5) | (0 << 10),
-    Opcode::MUL as u16 | (9 << 5) | (11 << 10),
-    Opcode::DN as _,
-    Opcode::DN as _,
+    Opcode::TMP_MUL as u16 | (9 << 5) | (11 << 10),
+    Opcode::CPY as u16 | (5 << 5) | (1 << 10),
+    Opcode::DNO as _,
+    Opcode::DNO as _,
 
-    Opcode::CP as u16 | (5 << 5) | (1 << 10),
-    Opcode::BS as u16 | (9 << 5) | (10 << 10),
-    Opcode::DN as _,
-    Opcode::DN as _,
+    Opcode::TMP_BS as u16 | (9 << 5) | (10 << 10),
+    Opcode::DNO as _,
+    Opcode::DNO as _,
+    Opcode::DNO as _,
 
-    Opcode::CP as u16 | (9 << 5) | (31 << 10),
-    Opcode::DN as _,
-    Opcode::DN as _,
-    Opcode::DN as _,
+    Opcode::CPY as u16 | (9 << 5) | (31 << 10),
+    Opcode::DNO as _,
+    Opcode::DNO as _,
+    Opcode::DNO as _,
 
-    // br2
+    // exit
     Opcode::DBG_HALT as _,
-    Opcode::DN as _,
-    Opcode::DN as _,
-    Opcode::DN as _,
+    Opcode::DNO as _,
+    Opcode::DNO as _,
+    Opcode::DNO as _,
 
 ];
 
-fn gen_fibs(lim:usize) -> Vec<u64> {
-    let mut vec = Vec::new();
+fn gen_fibs() -> [u64;N as usize] {
+    let mut vals = [0;N as _];
     let (mut a, mut b) = (1,1);
-    for _ in 0 .. lim {
+    for i in 0 .. N as _ {
         let tmp = b + a;
         b = a;
         a = tmp;
-        vec.push(b);
+        vals[i] = b;
     }
-    return vec
+    return vals;
 }
 
 fn main() { unsafe {
@@ -103,8 +104,10 @@ fn main() { unsafe {
     let mut execed_inst_count = 0;
     let mut nops = 0;
     let mut mem_stall = 0;
+    let mut i_cache_miss_count = 0;
+    let mut i_cache_hit_count = 0;
     loop {
-        step(&mut cpu, &mut stop, &mut mem_deps, &mut execed_inst_count, &mut nops);
+        step(&mut cpu, &mut stop, &mut mem_deps, &mut execed_inst_count, &mut nops, &mut i_cache_miss_count, &mut i_cache_hit_count);
         if mem_deps.is_empty() {
             cycle_counter += 1;
         } else {
@@ -112,8 +115,8 @@ fn main() { unsafe {
                 let MMemOp { op_type, blk_sz, dst_addr, src_addr } = mem_dep;
 
                 let blk_sz = match blk_sz {
-                    MemBlkSize::B64 => 64,
-                    MemBlkSize::B256 => 256,
+                    MemBlkSize::B128 => 64,
+                    MemBlkSize::B512 => 256,
                     MemBlkSize::B1024 => 1024,
                     MemBlkSize::B4096 => 4096,
                 };
@@ -140,11 +143,12 @@ fn main() { unsafe {
     }
 
     let fib_nums = core::slice::from_raw_parts(cpu.lmem.b.as_ptr().cast::<u64>(), N as _);
-    assert!(fib_nums == gen_fibs(N as _));
+    let v = gen_fibs();
+    assert!(fib_nums == v.as_slice());
 
     println!(
-        "Executed {} instructions ({} nops) in {} cycles ({} on gmem access)",
-        execed_inst_count, nops, cycle_counter, mem_stall)
+        "Executed {} instructions ({} nops) in {} cycles ({} spent on gmem ops)\nExperienced {} i$ misses during execution ({} hits)",
+        execed_inst_count, nops, cycle_counter, mem_stall, i_cache_miss_count, i_cache_hit_count)
 } }
 
 #[repr(C)]
@@ -181,30 +185,34 @@ struct CpuState {
     ipage_bptr: u64,
 }
 
-
 #[allow(dead_code)]
 #[allow(non_camel_case_types)]
 #[repr(u8)]
 enum Opcode {
-    DN = 0,
-    LDV,
-    STV,
-    LDS_1,
-    STS_1,
-    CP,
-    PUT,
-    BET,
-    BS,
-    BM,
-    BINV,
-    BAND,
-    BOR,
-    BXOR,
-    BSL,
-    BSR,
-    MUL,
-    DIV,
+
+    DNO = 0, // do nothing
+    LDV, // load from scpad
+    STV, // store to scpad
+    LDS, // load segment from main from scpad
+    STS, // store segment from scpad to main
+    CPY, // reg2reg copy
+    PUC, // put 5 bit constant into register
+
+    TEZ, // test equiv to zero
+    NAND, // bitwise not and
+    BSL, // bitwise shift left 1,4, or 16 bits
+    BSR, // bitwise shift right 1,4, or 16 bits
+
+    // remove these
+    TMP_BSL,
+    TMP_BET,
+    TMP_BS,
+    TMP_BM,
+    TMP_BOR,
+    TMP_MUL,
+
     DBG_HALT,
+
     EXT = 31
 }
 
@@ -224,7 +232,7 @@ struct MMemOp {
 #[repr(u8)]
 #[derive(Debug)]
 enum MemBlkSize1 {
-    B64 = 0, B1024 = 1
+    B128 = 0, B1024 = 1
 }
 #[allow(dead_code)]
 #[repr(u8)]
@@ -237,7 +245,7 @@ enum MemBlkSize2 {
 #[repr(u8)]
 #[derive(Debug)]
 enum MemBlkSize {
-    B64, B1024, B256, B4096
+    B128, B1024, B512, B4096
 }
 
 fn proc(
@@ -253,9 +261,8 @@ fn proc(
         Opcode::DBG_HALT => {
             *stop = true;
         },
-        Opcode::DN => {
+        Opcode::DNO => {
             *nop_count += 1;
-            return;
         },
         Opcode::LDV => {
             let ibits = isnt as u16 >> 5;
@@ -279,7 +286,7 @@ fn proc(
                 cpu.lmem.dw.as_mut_ptr().cast::<u8>().add(dst_addr as usize).cast::<u64>().write(val);
             }
         },
-        Opcode::LDS_1 => {
+        Opcode::LDS => {
             let ibits = isnt as u16 >> 5;
             let mmem_addr_r = ibits & ((1 << 5) - 1);
             let mmem_addr = cpu.rfile.dw[mmem_addr_r as usize];
@@ -287,7 +294,7 @@ fn proc(
             let lmem_addr_r = (ibits >> 5) & ((1 << 2) - 1);
             let lmem_addr = cpu.rfile.dw[lmem_addr_r as usize];
             let bs = ibits >> 15;
-            let bs = if bs == 1 { MemBlkSize::B4096 } else { MemBlkSize::B64 };
+            let bs = if bs == 1 { MemBlkSize::B1024 } else { MemBlkSize::B128 };
             let mem_op = MMemOp {
                 src_addr: mmem_addr,
                 dst_addr: lmem_addr,
@@ -296,7 +303,7 @@ fn proc(
             };
             mem_deps.push(mem_op);
         },
-        Opcode::STS_1 => {
+        Opcode::STS => {
             let ibits = isnt as u16 >> 5;
             let lmem_addr_r = ibits & ((1 << 5) - 1);
             let lmem_addr = cpu.rfile.dw[lmem_addr_r as usize];
@@ -304,7 +311,7 @@ fn proc(
             let mmem_addr_r = (ibits >> 5) & ((1 << 2) - 1);
             let mmem_addr = cpu.rfile.dw[mmem_addr_r as usize];
             let bs = ibits >> 15;
-            let bs = if bs == 1 { MemBlkSize::B64 } else { MemBlkSize::B4096 };
+            let bs = if bs == 1 { MemBlkSize::B1024 } else { MemBlkSize::B128 };
             let mem_op = MMemOp {
                 src_addr: lmem_addr,
                 dst_addr: mmem_addr,
@@ -313,59 +320,67 @@ fn proc(
             };
             mem_deps.push(mem_op);
         },
-        Opcode::CP => {
+        Opcode::CPY => {
             let ibits = isnt as u16 >> 5;
             let a1 = ibits & ((1 << 5) - 1);
             let a2 = (ibits >> 5) & ((1 << 5) - 1);
             cpu.rfile.dw[a2 as usize] = cpu.rfile.dw[a1 as usize];
         },
-        Opcode::PUT => {
+        Opcode::PUC => {
             let ibits = isnt as u16 >> 5;
             let dst = ibits & ((1 << 5) - 1);
             let imm = (ibits >> 5) & ((1 << 6) - 1);
             cpu.rfile.dw[dst as usize] = imm as _;
         },
-        Opcode::BET => {
+        Opcode::TMP_BET => {
             let ibits = isnt as u16 >> 5;
             let a1 = ibits & ((1 << 5) - 1);
             let a2 = (ibits >> 5) & ((1 << 5) - 1);
             cpu.rfile.dw[a1 as usize] =
                 (cpu.rfile.dw[a1 as usize] == cpu.rfile.dw[a2 as usize]) as _;
         },
-        Opcode::BS => {
+        Opcode::TMP_BS => {
             let ibits = isnt as u16 >> 5;
             let a1 = ibits & ((1 << 5) - 1);
             let a2 = (ibits >> 5) & ((1 << 5) - 1);
             cpu.rfile.dw[a1 as usize] =
                 cpu.rfile.dw[a1 as usize] + cpu.rfile.dw[a2 as usize];
         },
-        Opcode::BINV => {
-            let ibits = isnt as u16 >> 5;
-            let a1 = ibits & ((1 << 5) - 1);
-            cpu.rfile.dw[a1 as usize] = !cpu.rfile.dw[a1 as usize] ;
-        },
-        Opcode::BAND => {
+        Opcode::NAND => {
             let ibits = isnt as u16 >> 5;
             let a1 = ibits & ((1 << 5) - 1);
             let a2 = (ibits >> 5) & ((1 << 5) - 1);
             cpu.rfile.dw[a1 as usize] =
-                cpu.rfile.dw[a1 as usize] & cpu.rfile.dw[a2 as usize];
+                !(cpu.rfile.dw[a1 as usize] & cpu.rfile.dw[a2 as usize]);
         },
-        Opcode::BOR => {
+        Opcode::TMP_BOR => {
             let ibits = isnt as u16 >> 5;
             let a1 = ibits & ((1 << 5) - 1);
             let a2 = (ibits >> 5) & ((1 << 5) - 1);
             cpu.rfile.dw[a1 as usize] =
                 cpu.rfile.dw[a1 as usize] | cpu.rfile.dw[a2 as usize];
         },
-        Opcode::BXOR => {
+        Opcode::BSL  => {
             let ibits = isnt as u16 >> 5;
             let a1 = ibits & ((1 << 5) - 1);
             let a2 = (ibits >> 5) & ((1 << 5) - 1);
-            cpu.rfile.dw[a1 as usize] =
-                cpu.rfile.dw[a1 as usize] ^ cpu.rfile.dw[a2 as usize];
+            match a2 {
+                0 => {
+                    cpu.rfile.dw[a1 as usize] =
+                        cpu.rfile.dw[a1 as usize] << 1 ;
+                },
+                1 => {
+                    cpu.rfile.dw[a1 as usize] =
+                        cpu.rfile.dw[a1 as usize] << 4 ;
+                },
+                2 => {
+                    cpu.rfile.dw[a1 as usize] =
+                        cpu.rfile.dw[a1 as usize] << 16 ;
+                },
+                _ => unreachable!()
+            }
         },
-        Opcode::BSL => {
+        Opcode::TMP_BSL => {
             let ibits = isnt as u16 >> 5;
             let a1 = ibits & ((1 << 5) - 1);
             let a2 = (ibits >> 5) & ((1 << 5) - 1);
@@ -379,28 +394,26 @@ fn proc(
             cpu.rfile.dw[a1 as usize] =
                 cpu.rfile.dw[a1 as usize] >> cpu.rfile.dw[a2 as usize];
         },
-        Opcode::MUL => {
+        Opcode::TMP_MUL => {
             let ibits = isnt as u16 >> 5;
             let a1 = ibits & ((1 << 5) - 1);
             let a2 = (ibits >> 5) & ((1 << 5) - 1);
             cpu.rfile.dw[a1 as usize] =
                 cpu.rfile.dw[a1 as usize] * cpu.rfile.dw[a2 as usize];
         },
-        Opcode::DIV => {
-            let ibits = isnt as u16 >> 5;
-            let a1 = ibits & ((1 << 5) - 1);
-            let a2 = (ibits >> 5) & ((1 << 5) - 1);
-            cpu.rfile.dw[a1 as usize] =
-                cpu.rfile.dw[a1 as usize] / cpu.rfile.dw[a2 as usize];
-        },
-        Opcode::BM => {
+        Opcode::TMP_BM => {
             let ibits = isnt as u16 >> 5;
             let a1 = ibits & ((1 << 5) - 1);
             let a2 = (ibits >> 5) & ((1 << 5) - 1);
             cpu.rfile.dw[a1 as usize] =
                 cpu.rfile.dw[a1 as usize] - cpu.rfile.dw[a2 as usize];
         },
-        Opcode::EXT => todo!(),
+        Opcode::TEZ => {
+            let ibits = isnt as u16 >> 5;
+            let a1 = ibits & ((1 << 5) - 1);
+            cpu.rfile.dw[a1 as usize] = (0 == cpu.rfile.dw[a1 as usize]) as _;
+        },
+        Opcode::EXT => panic!("Invalid instruction"),
     }
 } }
 
@@ -409,7 +422,9 @@ fn step(
     stop: &mut bool,
     mem_deps: &mut Vec<MMemOp>,
     i_count: &mut usize,
-    nop_count: &mut usize
+    nop_count: &mut usize,
+    i_cache_miss_count: &mut usize,
+    i_cache_hit_count: &mut usize
 ) { unsafe {
 
     let ip = cpu.rfile.dw[31];
@@ -417,9 +432,12 @@ fn step(
 
     let icache_miss = ipage_baddr != cpu.ipage_bptr ;
     if icache_miss {
+        *i_cache_miss_count += 1;
         let page_ix = ip >> 9;
         cpu.icache = cpu.gmem.IMEM[page_ix as usize];
         cpu.ipage_bptr = ip & !((1 << 9) - 1);
+    } else {
+        *i_cache_hit_count += 1;
     }
     let i_bofft = ip - ipage_baddr;
     let pack_ix = i_bofft >> 3;
@@ -442,4 +460,114 @@ fn step(
     return ;
 } }
 
+
+
+#[test]
+fn nand_puter() {
+    // https://en.wikipedia.org/wiki/NAND_logic
+
+    fn nand(a:u16, b:u16) -> u16 {
+        !(a & b)
+    }
+    for k in 0 .. 256 {
+        for r in 0 .. 256 {
+            let c = nand(k, r);
+            let g = !(k & r);
+            assert!(g == c);
+        }
+    }
+    fn bit_not(a:u16) -> u16 {
+        nand(a, a)
+    }
+    for k in 0 .. 256 {
+        let c = bit_not(k);
+        let r = !k;
+        assert!(c == r)
+    }
+    fn bit_and(a:u16,b:u16) -> u16 {
+        let c = nand(a, b);
+        nand(c, c)
+    }
+    for k in 0 .. 256 {
+        for r in 0 .. 256 {
+            let c = bit_and(k, r);
+            let g = k & r;
+            assert!(g == c);
+        }
+    }
+    fn bit_or(a:u16, b:u16) -> u16 {
+        let a = nand(a, a);
+        let b = nand(b, b);
+        let c = nand(a, b);
+        return c;
+    }
+    for k in 0 .. 256 {
+        for r in 0 .. 256 {
+            let c = bit_or(k, r);
+            let g = k | r;
+            assert!(g == c);
+        }
+    }
+    fn bit_xor(a:u16, b:u16) -> u16 {
+        let i = nand(a, b);
+        let k = nand(a, i);
+        let r = nand(b, i);
+        let c = nand(k, r);
+        return c;
+    }
+    for k in 0 .. 256 {
+        for r in 0 .. 256 {
+            let c = bit_xor(k, r);
+            let g = k ^ r;
+            assert!(g == c);
+        }
+    }
+
+    fn add(mut a: u16, mut b: u16) -> u16 {
+        for _ in 0 .. 16 {
+            let k = bit_xor(a, b);
+            let om = bit_and(a , b) << 1;
+            a = k;
+            b = om;
+        }
+        return a;
+    }
+    for k in 0 .. u16::MAX {
+        let l = u16::MAX - k;
+        let c = add(k, l);
+        let g = k + l;
+        assert!(g == c);
+    }
+    fn bet(a:u16, b:u16) -> u16 {
+        // a == b
+        let k = bit_xor(a, b);
+        let k = (k == 0) as u16;
+        return k;
+    }
+    fn bool_not(a:u16) -> u16 {
+        bet(0, a)
+    }
+    assert!(bool_not(1) == 0);
+    assert!(bool_not(0) == 1);
+
+    fn mul(a: u16, b: u16) -> u16 {
+        let mut result = 0;
+        for i in 0 .. 16 {
+            let k = bit_and(b, 1 << i);
+            let k = bet(k, 0);
+            let k = bool_not(k);
+            let r = (a * k as u16) << i;
+            result = add(result, r);
+        }
+        return result;
+    }
+    for k in 0 .. 256 {
+        for r in 0 .. 256 {
+            let c = mul(k, r);
+            let g = k * r;
+            assert!(g == c);
+        }
+    }
+
+}
 
