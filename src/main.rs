@@ -153,10 +153,10 @@ fn main() { unsafe {
     let sparcity = (nops_count as f32 / total_inst_count as f32) * 100.0;
 
     writeln!(&mut report,
-        "Executed total of {total_inst_count} instructions.\n{usefull} usefull and {nops_count} nops in {cycle_count} cycles ({ipc_rate} IPC rate) ({sparcity}% sparsity)"
+        "Executed total of {total_inst_count} instructions.\n{usefull} usefull and {nops_count} nops in {cycle_count} cycles (~{ipc_rate:.1} average IPC rate) (~{sparcity:.1}% average sparsity)"
     ).unwrap();
-    writeln!(&mut report, "{mem_stall} cycles spent stalled on repsense from gmem").unwrap();
-    writeln!(&mut report, "Experienced {i_cache_miss_count} i$ misses during execution ({i_cache_hit_count} hits)").unwrap();
+    writeln!(&mut report, "{mem_stall} cycles spent stalled on response from extmem").unwrap();
+    writeln!(&mut report, "Experienced {i_cache_miss_count} misses and {i_cache_hit_count} hits on $i during execution").unwrap();
     println!("{}", report);
 } }
 
@@ -205,9 +205,9 @@ enum Opcode {
     STV, // store to scpad
     LDS, // load segment from main to scpad
     STS, // store segment from scpad to main
+    LAV, // loads a value from gmem to a specified reg and atomically sets an ownership flag returning it in a specified register.
+    STAV, // tries to atomically store a value in specified register into memory to gmem, and returns a flag in specified register denoting if this operation succeded or not
     PUC, // put 5 bit constant into register
-    LAV, // loads a value from gmem to a specified reg and atomically sets an ownership flag returning it in a specified register
-    STAV, // tries to atomically store a value in specified register into memory to gmem, and returns a flag in specified register denoting if this operation succeded succeded or not
     CPY, // reg2reg copy
 
     TEZ, // test equiv to zero
@@ -215,9 +215,7 @@ enum Opcode {
     BSL, // bitwise shift left 1,4, or 16 bits
     BSR, // bitwise shift right 1,4, or 16 bits
 
-    CHKLDF, // checks if mem2scpad load issued on specific address range has finished
-    CHKSTF, // checks if scpad2mem store issued on specific address range has finished
-    WSTF, // wait for prior scpad2mem store to finish on specific address range
+    CHKMOPS, // checks if issued load or store gmem-scpaf operation on specific segment has finished
 
     DBG_HALT,
 
@@ -430,9 +428,7 @@ fn proc(
             let a1 = ibits & ((1 << 5) - 1);
             cpu.rfile.dw[a1 as usize] = (0 == cpu.rfile.dw[a1 as usize]) as _;
         },
-        Opcode::CHKLDF => todo!(),
-        Opcode::CHKSTF => todo!(),
-        Opcode::WSTF => todo!(),
+        Opcode::CHKMOPS => todo!(),
         Opcode::LAV => todo!(),
         Opcode::STAV => todo!(),
         Opcode::LIMIT => panic!("Invalid instruction"),
