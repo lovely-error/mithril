@@ -157,6 +157,7 @@ fn main() { unsafe {
     ).unwrap();
     writeln!(&mut report, "{mem_stall} cycles spent stalled on response from extmem").unwrap();
     writeln!(&mut report, "Experienced {i_cache_miss_count} misses and {i_cache_hit_count} hits on $i during execution").unwrap();
+    writeln!(&mut report, "Programm size was {} bytes", size_of_val(&PRG_FIB)).unwrap();
     println!("{}", report);
 } }
 
@@ -216,6 +217,8 @@ enum Opcode {
     BSR, // bitwise shift right 1,4, or 16 bits
 
     CHKMOPS, // checks if issued load or store gmem-scpaf operation on specific segment has finished
+
+    NPUP, // indicates how to split next pack into constituents
 
     DBG_HALT,
 
@@ -428,6 +431,7 @@ fn proc(
             let a1 = ibits & ((1 << 5) - 1);
             cpu.rfile.dw[a1 as usize] = (0 == cpu.rfile.dw[a1 as usize]) as _;
         },
+        Opcode::NPUP => todo!(),
         Opcode::CHKMOPS => todo!(),
         Opcode::LAV => todo!(),
         Opcode::STAV => todo!(),
