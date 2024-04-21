@@ -100,16 +100,17 @@ fn main() { unsafe {
 
     let mut stop = false;
     let mut mem_deps = Vec::<MMemOp>::new();
-    let mut cycle_counter = 0;
-    let mut execed_inst_count = 0;
-    let mut nops = 0;
+    let mut cycle_count = 0;
+    let mut total_inst_count = 0;
+    let mut nops_count = 0;
     let mut mem_stall = 0;
     let mut i_cache_miss_count = 0;
     let mut i_cache_hit_count = 0;
     loop {
-        step(&mut cpu, &mut stop, &mut mem_deps, &mut execed_inst_count, &mut nops, &mut i_cache_miss_count, &mut i_cache_hit_count);
+        step(&mut cpu, &mut stop, &mut mem_deps, &mut total_inst_count, &mut nops_count, &mut i_cache_miss_count, &mut i_cache_hit_count);
+        if stop { break; }
         if mem_deps.is_empty() {
-            cycle_counter += 1;
+            cycle_count += 1;
         } else {
             for mem_dep in &mem_deps {
                 let MMemOp { op_type, blk_sz, dst_addr, src_addr } = mem_dep;
@@ -134,21 +135,29 @@ fn main() { unsafe {
                 }
                 copy_nonoverlapping(src_ptr, dst_ptr, blk_sz); // this is kinda suppose to be slow XD
                 let gmem_lat = 64; // is this how many cycles it takes to get smth from main mem?
-                cycle_counter += gmem_lat;
+                cycle_count += gmem_lat;
                 mem_stall += gmem_lat;
             }
             mem_deps.clear()
         }
-        if stop { break; }
     }
 
     let fib_nums = core::slice::from_raw_parts(cpu.lmem.b.as_ptr().cast::<u64>(), N as _);
     let v = gen_fibs();
     assert!(fib_nums == v.as_slice());
 
-    println!(
-        "Executed {} instructions ({} nops) in {} cycles ({} spent on gmem ops)\nExperienced {} i$ misses during execution ({} hits)",
-        execed_inst_count, nops, cycle_counter, mem_stall, i_cache_miss_count, i_cache_hit_count)
+    let mut report = String::new();
+    use core::fmt::Write;
+    let usefull = total_inst_count - nops_count;
+    let ipc_rate = usefull as f32 / cycle_count as f32;
+    let sparcity = (nops_count as f32 / total_inst_count as f32) * 100.0;
+
+    writeln!(&mut report,
+        "Executed total of {total_inst_count} instructions.\n{usefull} usefull and {nops_count} nops in {cycle_count} cycles ({ipc_rate} IPC rate) ({sparcity}% sparsity)"
+    ).unwrap();
+    writeln!(&mut report, "{mem_stall} cycles spent stalled on repsense from gmem").unwrap();
+    writeln!(&mut report, "Experienced {i_cache_miss_count} i$ misses during execution ({i_cache_hit_count} hits)").unwrap();
+    println!("{}", report);
 } }
 
 #[repr(C)]
@@ -191,17 +200,27 @@ struct CpuState {
 enum Opcode {
 
     DNO = 0, // do nothing
+
     LDV, // load from scpad
     STV, // store to scpad
-    LDS, // load segment from main from scpad
+    LDS, // load segment from main to scpad
     STS, // store segment from scpad to main
-    CPY, // reg2reg copy
     PUC, // put 5 bit constant into register
+    LAV, // loads a value from gmem to a specified reg and atomically sets an ownership flag returning it in a specified register
+    STAV, // tries to atomically store a value in specified register into memory to gmem, and returns a flag in specified register denoting if this operation succeded succeded or not
+    CPY, // reg2reg copy
 
     TEZ, // test equiv to zero
     NAND, // bitwise not and
     BSL, // bitwise shift left 1,4, or 16 bits
     BSR, // bitwise shift right 1,4, or 16 bits
+
+    CHKLDF, // checks if mem2scpad load issued on specific address range has finished
+    CHKSTF, // checks if scpad2mem store issued on specific address range has finished
+    WSTF, // wait for prior scpad2mem store to finish on specific address range
+
+    DBG_HALT,
+
 
     // remove these
     TMP_BSL,
@@ -211,9 +230,7 @@ enum Opcode {
     TMP_BOR,
     TMP_MUL,
 
-    DBG_HALT,
-
-    EXT = 31
+    LIMIT = 31,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -413,7 +430,12 @@ fn proc(
             let a1 = ibits & ((1 << 5) - 1);
             cpu.rfile.dw[a1 as usize] = (0 == cpu.rfile.dw[a1 as usize]) as _;
         },
-        Opcode::EXT => panic!("Invalid instruction"),
+        Opcode::CHKLDF => todo!(),
+        Opcode::CHKSTF => todo!(),
+        Opcode::WSTF => todo!(),
+        Opcode::LAV => todo!(),
+        Opcode::STAV => todo!(),
+        Opcode::LIMIT => panic!("Invalid instruction"),
     }
 } }
 
