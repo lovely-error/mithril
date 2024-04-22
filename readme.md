@@ -2,8 +2,10 @@
 
 Here I explore moving all complexity from hardware to software :3
 1. `4ops-wide EIPA (Explicit instruction parallel architecture)` in RISC style.
-2. `explicit stashing of data` . Directly addressable scratchpad memory local to each core (like `__local` in OpenCL when (N,0,0)) . Small fast memory that acts like an extension to the register file
+2. `explicit stashing of data` . Directly addressable scratchpad memory local to each core (like `__local` in OpenCL when (N,0,0)) . Small fast memory that acts like an extension to the register file. Logically a separate address space.
    1. `LDS` and `STS` instructions are used to transfer memory between extmem and scpad
+   2. Loads from addresses past (1 << 48) - 1 always return one
+   3. Stores to addresses past (1 << 48) - 1 are noops
 3. Varying-size instructions, but only with `B16, B32, B64` as alowed lengths
 4. Only 4 operations for data processing! `TEZ, NAND, BSL, BSR`
    1. Minimises logic needed to be duplicated for each line of instruction packs
@@ -28,11 +30,11 @@ Here I explore moving all complexity from hardware to software :3
 
 So far computing `32 iterations` of fib seqv in scratchpad mem shows this perf props
 ```
-Executed total of 788 instructions.
-429 usefull and 359 nops in 196 cycles (~2.2 average IPC rate) (~45.6% average sparsity)
-0 cycles spent stalled on response from extmem
-Experienced 1 misses and 196 hits on $i during execution
-Programm size was 88 bytes
+Executed total of 4120 instructions.
+748 usefull and 3372 noops in 1030 cycles (~0.7 average IPC rate) (~81.8% average sparsity)
+64 cycles spent stalled on response from extmem
+Experienced 1 misses and 258 hits on $i during execution
+Programm size was 96 bytes
 ```
 
 Learned so far...
