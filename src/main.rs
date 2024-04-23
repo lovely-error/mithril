@@ -383,27 +383,27 @@ fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
                     ((dec_pat >> 2 & 0b11 == i) as u64 * ((u16::MAX as u64) << 16)) |
                     ((dec_pat >> 4 & 0b11 == i) as u64 * ((u16::MAX as u64) << 32)) |
                     ((dec_pat >> 6 & 0b11 == i) as u64 * ((u16::MAX as u64) << 48)) ;
-                if slam_pack == 0 {
-                    dec_pat &= !(
-                        ((dec_pat >> 0 & 0b11 == i) as u8 * (0b11 << 0)) |
-                        ((dec_pat >> 2 & 0b11 == i) as u8 * (0b11 << 2)) |
-                        ((dec_pat >> 4 & 0b11 == i) as u8 * (0b11 << 4)) |
-                        ((dec_pat >> 6 & 0b11 == i) as u8 * (0b11 << 6))
-                    );
+                if mask != 0 {
+                    let pack = if slam_pack != 0 { slam_pack } else { pack };
+                    let mut pack = pack & mask;
+                    let [i1, i2, i3, i4] = transmute::<_, &mut [Inst16;4]>(&mut pack);
+                    proc_i16(i1, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                    proc_i16(i2, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                    proc_i16(i3, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                    proc_i16(i4, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                    cycle_count += 1;
+                    mem_deps.check_mem_deps(state);
+                    if pack != 0 {
+                        slam_pack = pack;
+                        continue;
+                    }
                 }
-                let pack = if slam_pack != 0 { slam_pack } else { pack };
-                let mut pack = pack & mask;
-                let [i1, i2, i3, i4] = transmute::<_, &mut [Inst16;4]>(&mut pack);
-                proc_i16(i1, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                proc_i16(i2, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                proc_i16(i3, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                proc_i16(i4, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                cycle_count += 1;
-                mem_deps.check_mem_deps(state);
-                if pack != 0 {
-                    slam_pack = pack;
-                    continue;
-                }
+                dec_pat &= !(
+                    ((dec_pat >> 0 & 0b11 == i) as u8 * (0b11 << 0)) |
+                    ((dec_pat >> 2 & 0b11 == i) as u8 * (0b11 << 2)) |
+                    ((dec_pat >> 4 & 0b11 == i) as u8 * (0b11 << 4)) |
+                    ((dec_pat >> 6 & 0b11 == i) as u8 * (0b11 << 6))
+                );
                 i += 1;
                 if i == 4 { break }
             }
@@ -826,7 +826,7 @@ fn fib() -> [Pack;12] {
             Inst16::puc(8, 24), // loop start addr
             Inst16::puc(9, 0), // zero
             Inst16::puc(10, 8), // add bump len
-            Inst16::npup([0,0,0,1]), // this is the fucking bug!!!!!
+            Inst16::npup([0,0,0,1]),
         ]),
         Pack::i16x4(&[
             Inst16::puc(5, 0), // loop counter
@@ -880,8 +880,21 @@ fn fib() -> [Pack;12] {
     ]
 }
 
-// #[test]
 fn fibs() {
+    let mut cpu = CpuState::new();
+    let mut prg = vec![];
+    for p in fib() {
+        prg.push(p)
+    }
+    let rep = run_prg(&mut cpu, prg.as_slice());
+    println!("{}", rep);
+    let computed_fibs = unsafe {&cpu.lmem.dw[..(N as usize)]};
+    let ground_truth_fibs = gen_fibs();
+    assert!(computed_fibs == &ground_truth_fibs[..])
+}
+
+#[test]
+fn test_fibs() {
     let mut cpu = CpuState::new();
     let mut prg = vec![];
     for p in fib() {

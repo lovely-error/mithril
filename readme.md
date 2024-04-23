@@ -2,36 +2,36 @@
 
 Here I explore moving all complexity from hardware to software :3
 1. `4ops-wide EIPA (Explicit instruction parallel architecture)` in RISC style.
+   1. Instructions are grouped into 64 bits packs. 1..4 in each. Each instruction in a pack is executed simultaneously
+   2. Varying-size instructions, but only with `B16, B32, B64` as alowed lengths
 2. `explicit stashing of data` . Directly addressable scratchpad memory local to each core (like `__local` in OpenCL when (N,0,0)) . Small fast memory that acts like an extension to the register file. Logically a separate address space.
    1. `LDS` and `STS` instructions are used to transfer memory between extmem and scpad
    2. Loads from addresses past (1 << 48) - 1 always return one
    3. Stores to addresses past (1 << 48) - 1 are noops
-3. Varying-size instructions, but only with `B16, B32, B64` as alowed lengths
-4. Only 4 operations for data processing! `TEZ, NAND, BSL, BSR`
-   1. Minimises logic needed to be duplicated for each line of instruction packs
+3. Only 6 operations for data processing!
+   1. Minimises logic needed to be duplicated for each execution lane
    2. 1-cycle long issue-retire latency on any of these ops!
    3. All DPOs behave like `rX = rX OP rY` (movement is done by separate instruction)
-   4. No `add, sub, mul, div` operations implemented in hardware. all should be implemented in software to allow for promise of ~1 cycle execution of packs.
-5. Control flow through address manipulation and stores/loads on ip register
+   4. No `sub, mul, div` operations implemented in hardware. all should be implemented in software to allow for promise of ~1 cycle execution of packs.
+4. Control flow through address manipulation and stores/loads on ip register
    1. `31st register is rw` and represents address from which cpu reads intructions
-   2. ISA does not have intructions for doing conditional jumps
-   3. branching via "jump tables"
-6. No implicit 'near' caching (scrathpad is in different address space. No L1)
-7. No speculative execution (aka no attempts to runahead)
+   2. ISA does have one intruction for doing conditional jump based on values in registers
+   3. branching should be done via "jump tables" in software
+5. No implicit 'near' caching (scrathpad is in different address space. No L1)
+6. No speculative execution (aka no attempts to runahead)
    1. speculative fetch on $i and L2 is not prohibited
-8. Out of order beahaviour only for loads and stores to external memory ("main" memory) (completions of issued load/store ops is checkable)
+7. Out of order beahaviour only for loads and stores to external memory ("main" memory) (completions of issued load/store ops is checkable)
    1. One instruction `CHMOPS` to check if issued load or store of segment in scratchpad has finished or not.
    2. Issues of loads/stores on extmem do not stall the execution.
-      1. Only an attemp to load a value from scpad on a segment for which a load was issued and have not completed would stall.
-      2. Segment stores need not stall at all!
-9.  Simplified cache coherence (only E of MESI) on L2 (Only two operations that atomically operate on extmem) (scpad is coherent because only one core writes to it, and no speculation ever occurs) (memory subsystem is only responsible for tracking operations on extmem)
+      1. Segment for which load was issued and not awaited is considered hazardous.
+8.  Simplified cache coherence (only E of MESI) on L2 (Only two operations that atomically operate on extmem) (scpad is coherent because only one core writes to it, and no speculation ever occurs) (memory subsystem is only responsible for tracking operations on extmem)
       1. One is `try load exclusive with flag` which returns a value in one register and flag in another indicating if a core has a cache line locked. If flag is false, the return value is not most recent . If true, it is most recent and core owns cache line.
       2. One is `try store exclusive with flag` which attempts to store a value to external mem and returns a flag if it succeded or not.
 
 So far computing `32 iterations` of fib seqv in scratchpad mem shows this perf props
 ```
-Executed total of 4120 instructions.
-748 usefull and 3372 noops in 1030 cycles (~0.7 average IPC rate) (~81.8% average sparsity)
+Executed total of 2960 instructions.
+748 usefull and 2212 noops in 740 cycles (~1.0 average IPC rate) (~74.7% average sparsity)
 64 cycles spent stalled on response from extmem
 Experienced 1 misses and 258 hits on $i during execution
 Programm size was 96 bytes
