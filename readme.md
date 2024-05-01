@@ -32,7 +32,6 @@ So far computing `32 iterations` of fib seqv in scratchpad mem shows this perf p
 ```
 Executed total of 2960 instructions.
 748 usefull and 2212 noops in 740 cycles (~1.0 average IPC rate) (~74.7% average sparsity)
-64 cycles spent stalled on response from extmem
 Experienced 1 misses and 258 hits on $i during execution
 Programm size was 96 bytes
 ```

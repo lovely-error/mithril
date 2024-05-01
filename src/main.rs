@@ -1,17 +1,13 @@
 #![feature(generic_arg_infer)]
-#![feature(portable_simd)]
 
-use core::{mem::{size_of, transmute}, ptr::copy_nonoverlapping};
+use core::{mem::{size_of, transmute}, ptr::{addr_of_mut, copy_nonoverlapping}};
 
 fn main() {
     fibs();
 }
 
-
 const N: u16 = 32;
-
 const _ : () = if N > (1 << 6) - 1 { panic!() };
-
 
 #[repr(C)]
 union RegFile {
@@ -20,40 +16,108 @@ union RegFile {
 
 #[allow(non_snake_case)]
 #[repr(C)]
-union GMem {
-    B64: [[u8;64]; GLOBAL_MEM_SIZE / size_of::<[u8;64]>()],
-    B256: [[u8;256]; GLOBAL_MEM_SIZE / size_of::<[u8;256]>()],
-    // B1024: [[u8;1024]; GLOBAL_MEM_SIZE / size_of::<[u8;1024]>()],
-    // B4096: [[u8;4096]; GLOBAL_MEM_SIZE / size_of::<[u8;4096]>()],
-    IMEM: [[u64;64]; GLOBAL_MEM_SIZE / size_of::<[u64;64]>()],
-    BYTES: [u8;GLOBAL_MEM_SIZE],
+union ExternalMem {
+    B64: [[u8;64]; EXTERNAL_MEM_SIZE / size_of::<[u8;64]>()],
+    IMEM: [[u64;128]; EXTERNAL_MEM_SIZE / size_of::<[u64;128]>()],
+    BYTES: [u8;EXTERNAL_MEM_SIZE],
 }
 
 #[repr(C)]
-union LMem {
-    b: [u8;LOCAL_MEM_SIZE],
-    dw: [u64; LOCAL_MEM_SIZE / size_of::<u64>()],
+union Sracthpad {
+    b: [u8;SCRATCHPAD_MEM_SIZE],
+    dw: [u64; SCRATCHPAD_MEM_SIZE / size_of::<u64>()],
 }
 
-const LOCAL_MEM_SIZE: usize = 1024;
-const GLOBAL_MEM_SIZE: usize = 1024*8;
+const SCRATCHPAD_MEM_SIZE: usize = 1024*64;
+const EXTERNAL_MEM_SIZE: usize = 1024*1024*1;
 
 
+const ISTASH_SIZE: usize = 1024*8;
+const BUCKET_COUNT: usize = ISTASH_SIZE / size_of::<IStashCell>();
+type IStashCell = [u64;128];
+#[derive(Debug)]
+struct IStash {
+    cells: [IStashCell;BUCKET_COUNT],
+    bp_addrs_bits: [u64;BUCKET_COUNT],
+    counters: [u8;BUCKET_COUNT]
+}
+impl IStash {
+    const DECAY_COUNT: u8 = 64;
+    fn new() -> Self {
+        Self {
+            cells: [[0;_];_],
+            bp_addrs_bits: [u64::MAX;_],
+            counters: [0;_]
+        }
+    }
+    fn bucket_index_from_addr(addr: usize) -> usize {
+        (addr >> 10) & !((1 << 10) - 1)
+    }
+    fn addr_bits(addr: usize) -> u64 {
+        (addr >> 10) as _
+    }
+    fn try_find(&mut self, addr: usize) -> Option<*const IStashCell> {
+        let addr_bits = Self::addr_bits(addr);
+        let mut ix = 0u64;
+        for i in 0 .. BUCKET_COUNT {
+           ix |= ((self.bp_addrs_bits[i] == addr_bits) as u64) << i;
+        }
+        if ix == 0 { return None }
+        let ix = ix.trailing_zeros() as usize;
+        for i in 0 .. BUCKET_COUNT {
+            self.counters[i] =
+            self.counters[i].saturating_sub((i != ix) as _);
+        }
+        let bucket = &self.cells[ix];
+        return Some(bucket);
+    }
+    fn load(&mut self, addr: usize, src: *const IStashCell) {
+        let mut ix = 0u64;
+        for i in 0 .. BUCKET_COUNT {
+           ix |= ((self.counters[i] == 0) as u64) << i;
+        }
+        let no_free = ix == 0;
+        let index = if no_free { // just nuke some stuff
+            Self::bucket_index_from_addr(addr)
+        } else { // occupy free
+            ix.trailing_zeros() as usize
+        };
+        let hash = Self::addr_bits(addr);
+        self.bp_addrs_bits[index] = hash;
+        self.counters[index] = Self::DECAY_COUNT;
+        unsafe {
+            copy_nonoverlapping(
+                src.cast::<u8>(),
+                addr_of_mut!(self.cells[index]).cast::<u8>(),
+                size_of::<IStashCell>()
+            )
+        };
+    }
+}
+#[test] #[ignore]
+fn istash_test() {
+    let mut stash = IStash::new();
+    let v : IStashCell = [u64::MAX;_];
+    stash.load(1024*2, &v);
+    stash.load(1024*3, &v);
+    stash.try_find(1024*3);
+    println!("!");
+}
+
+#[repr(C)]
 struct CpuState {
-    rfile: RegFile,
-    lmem: LMem,
-    gmem: GMem,
-    icache: [u64;64],
-    ipage_bptr: u64,
+    instruction_stash: Box<IStash>,
+    register_file: RegFile,
+    scratchpad_mem: Box<Sracthpad>,
+    external_mem: Box<ExternalMem>,
 }
 impl CpuState {
     fn new() -> Self {
         Self {
-            rfile: RegFile { dw: [0;_] },
-            lmem: LMem { b: [0;_] },
-            gmem: GMem { BYTES: [0; _] },
-            icache: [0;_],
-            ipage_bptr: u64::MAX
+            register_file: RegFile { dw: [0;_] },
+            scratchpad_mem: Box::new(Sracthpad { b: [0;_] }),
+            external_mem: Box::new(ExternalMem { BYTES: [0; _] }),
+            instruction_stash: Box::new(IStash::new())
         }
     }
 }
@@ -220,7 +284,7 @@ impl Pack {
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 enum MMemOpType {
-    Store, Load
+    SCPAD2MEM, MEM2SCPAD
 }
 #[derive(Debug)]
 struct MemOp {
@@ -246,7 +310,10 @@ enum MemBlkSize2 {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 enum MemBlkSize {
-    B128, B1024, B512, B4096
+    B64,
+    B256,
+    B1024,
+    B4096
 }
 
 struct MemCtrl {
@@ -260,14 +327,15 @@ struct MemCtrl {
 impl MemCtrl {
     fn new() -> Self {
         MemCtrl {
-            blk_sz: [MemBlkSize::B512;_],
-            op_type: [MMemOpType::Store;_],
+            blk_sz: [MemBlkSize::B256;_],
+            op_type: [MMemOpType::SCPAD2MEM;_],
             saddr: [0;_],
             daddr: [0;_],
             occupation_map: 0,
             delay_count: [0;_],
         }
     }
+    #[must_use]
     fn put(&mut self, mop: MemOp) -> bool {
         let MemOp { src_addr, dst_addr, blk_sz, op_type } = mop;
         let index = self.occupation_map.trailing_ones();
@@ -277,7 +345,7 @@ impl MemCtrl {
         self.op_type[index] = op_type;
         self.saddr[index] = src_addr;
         self.daddr[index] = dst_addr;
-        self.delay_count[index] = 64;
+        self.delay_count[index] = 100;
         return true;
     }
     fn check_mem_deps(&mut self, cpu: &mut CpuState) { unsafe {
@@ -290,23 +358,24 @@ impl MemCtrl {
                 let src = self.saddr[ix];
                 let dst = self.daddr[ix];
                 let blk_sz = match self.blk_sz[ix] {
-                    MemBlkSize::B128 => 128,
+                    MemBlkSize::B64 => 64,
+                    MemBlkSize::B256 => 256,
                     MemBlkSize::B1024 => 1024,
-                    MemBlkSize::B512 => 512,
                     MemBlkSize::B4096 => 4096,
                 };
+                let src_ptr ;
+                let dst_ptr ;
                 match self.op_type[ix] {
-                    MMemOpType::Load => {
-                        let src_ptr = cpu.gmem.BYTES.as_ptr().add(src as usize);
-                        let dst_ptr = cpu.lmem.b.as_mut_ptr().add(dst as usize);
-                        copy_nonoverlapping(src_ptr, dst_ptr, blk_sz);
+                    MMemOpType::MEM2SCPAD => {
+                        src_ptr = cpu.external_mem.BYTES.as_ptr().add(src as usize);
+                        dst_ptr = cpu.scratchpad_mem.b.as_mut_ptr().add(dst as usize);
                     },
-                    MMemOpType::Store => {
-                        let src_ptr = cpu.lmem.b.as_ptr().add(src as usize);
-                        let dst_ptr = cpu.gmem.BYTES.as_mut_ptr().add(dst as usize);
-                        copy_nonoverlapping(src_ptr, dst_ptr, blk_sz);
+                    MMemOpType::SCPAD2MEM => {
+                        src_ptr = cpu.scratchpad_mem.b.as_ptr().add(src as usize);
+                        dst_ptr = cpu.external_mem.BYTES.as_mut_ptr().add(dst as usize);
                     }
                 }
+                copy_nonoverlapping(src_ptr, dst_ptr, blk_sz);
                 ixs &= !(ix as u16);
             } else {
                 self.delay_count[ix] = delc;
@@ -335,7 +404,7 @@ impl MemCtrl {
 fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
 
     let byte_len = prg_bytes.len() * 8;
-    let dst = state.gmem.BYTES.as_mut_ptr().cast::<u8>();
+    let dst = state.external_mem.BYTES.as_mut_ptr().cast::<u8>();
     copy_nonoverlapping(
         prg_bytes.as_ptr().cast::<u8>(),
         dst,
@@ -347,31 +416,30 @@ fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
     let mut cycle_count = 0;
     let mut noops_count = 0;
     let mut usefull_count = 0;
-    let mut mem_stall = 0;
     let mut i_cache_miss_count = 0;
     let mut i_cache_hit_count = 0;
+    let mut cache_fill_stall = 0;
 
     let mut decode_pattern = 0u8;
     loop {
-        let ip = state.rfile.dw[31];
-        let ipage_baddr = ip & !((1 << 9) - 1);
-        let icache_miss = ipage_baddr != state.ipage_bptr ;
-        if icache_miss {
-            let page_ix = (ip >> 9) as usize;
-            state.icache = state.gmem.IMEM[page_ix];
-            mem_stall += 64; // do it better
-            state.ipage_bptr = ip & !((1 << 9) - 1);
-            i_cache_miss_count += 1;
-        } else {
-            i_cache_hit_count += 1;
-        }
-        let i_bofft = ip - ipage_baddr;
-        let pack_ix = i_bofft >> 3;
-        let inst_ix = i_bofft - (i_bofft & !((1 << 3) - 1));
-        let pack = state.icache[pack_ix as usize];
-        let pack = pack & (u64::MAX >> (8 * inst_ix));
-        let rem_b = 8 - inst_ix;
-        state.rfile.dw[31] += rem_b;
+        let ip = state.register_file.dw[31];
+        let blob = match  state.instruction_stash.try_find(ip as _) {
+            Some(blob) => { // hit
+                i_cache_hit_count += 1;
+                blob
+            },
+            None => { // miss
+                i_cache_miss_count += 1;
+                let block_addr = ip & !((1 << 10) - 1);
+                let src = &state.external_mem.IMEM[block_addr as usize];
+                state.instruction_stash.load(ip as _, src);
+                cache_fill_stall += 100; // do it better
+                continue;
+            },
+        };
+        let pack_ix = ip >> 3;
+        let pack = *blob.cast::<u64>().add(pack_ix as _);
+        state.register_file.dw[31] += 8; // todo: change to allow jumps to arbitrary instructions
 
         let mut slam_pack = 0;
         if decode_pattern != 0 {
@@ -437,8 +505,8 @@ fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
     writeln!(&mut report,
         "Executed total of {total_instruction_count} instructions.\n{usefull} usefull and {noops_count} noops in {cycle_count} cycles (~{ipc_rate:.1} average IPC rate) (~{sparcity:.1}% average sparsity)"
     ).unwrap();
-    writeln!(&mut report, "{mem_stall} cycles spent stalled on response from extmem").unwrap();
-    writeln!(&mut report, "Experienced {i_cache_miss_count} misses and {i_cache_hit_count} hits on $i during execution").unwrap();
+    writeln!(&mut report, "{cache_fill_stall} cycles spent stalled on instruction stash fill").unwrap();
+    writeln!(&mut report, "Experienced {i_cache_miss_count} misses and {i_cache_hit_count} hits on i$ during execution").unwrap();
     writeln!(&mut report, "Programm size was {} bytes", byte_len).unwrap();
     return report;
 
@@ -464,44 +532,44 @@ fn proc_i16(
         Opcode::LDV => {
             *use_count += 1;
             let sr = inst.get_arg1();
-            let src_addr = cpu.rfile.dw[sr as usize];
+            let src_addr = cpu.register_file.dw[sr as usize];
             let val = if src_addr < 1 << 48 {
-                *cpu.lmem.dw.as_ptr().cast::<u8>().add(src_addr as usize).cast::<u64>()
+                *cpu.scratchpad_mem.dw.as_ptr().cast::<u8>().add(src_addr as usize).cast::<u64>()
             } else {
                 0
             };
             let dst = inst.get_arg2();
-            cpu.rfile.dw[dst as usize] = val;
+            cpu.register_file.dw[dst as usize] = val;
         },
         Opcode::STV => {
             *use_count += 1;
             let dar = inst.get_arg1();
-            let dst_addr = cpu.rfile.dw[dar as usize];
+            let dst_addr = cpu.register_file.dw[dar as usize];
             if dst_addr < 1 << 48 {
                 let vr = inst.get_arg2();
-                let val = cpu.rfile.dw[vr as usize];
-                cpu.lmem.dw.as_mut_ptr().cast::<u8>().add(dst_addr as usize).cast::<u64>().write(val);
+                let val = cpu.register_file.dw[vr as usize];
+                cpu.scratchpad_mem.dw.as_mut_ptr().cast::<u8>().add(dst_addr as usize).cast::<u64>().write(val);
             }
         },
         Opcode::LDS => {
             *use_count += 1;
             let mmem_addr_r = inst.get_arg1();
-            let mmem_addr = cpu.rfile.dw[mmem_addr_r as usize];
+            let mmem_addr = cpu.register_file.dw[mmem_addr_r as usize];
             if mmem_addr >= 1 << 48 {
                 *inst = Inst16::dno();
                 return
             }
             let lmem_addr_r = inst.get_arg2();
-            let lmem_addr = cpu.rfile.dw[lmem_addr_r as usize];
+            let lmem_addr = cpu.register_file.dw[lmem_addr_r as usize];
             let mem_op_ty = inst.get_mem_size();
             let blk_sz_ty = match mem_op_ty {
-                MemBlkSize1::B128 => MemBlkSize::B128,
+                MemBlkSize1::B128 => MemBlkSize::B64,
                 MemBlkSize1::B1024 => MemBlkSize::B1024,
             };
             let mem_op = MemOp {
                 src_addr: mmem_addr,
                 dst_addr: lmem_addr,
-                op_type: MMemOpType::Load,
+                op_type: MMemOpType::MEM2SCPAD,
                 blk_sz: blk_sz_ty
             };
             let ok = mem_ops.put(mem_op);
@@ -511,21 +579,21 @@ fn proc_i16(
         Opcode::STS => {
             *use_count += 1;
             let lmem_addr_r = inst.get_arg1();
-            let lmem_addr = cpu.rfile.dw[lmem_addr_r as usize];
+            let lmem_addr = cpu.register_file.dw[lmem_addr_r as usize];
             if lmem_addr >= 1 << 48 {
                 *inst = Inst16::dno();
                 return;
             }
             let mmem_addr_r = inst.get_arg2();
-            let mmem_addr = cpu.rfile.dw[mmem_addr_r as usize];
+            let mmem_addr = cpu.register_file.dw[mmem_addr_r as usize];
             let blk_sz_ty = match inst.get_mem_size() {
-                MemBlkSize1::B128 => MemBlkSize::B128,
+                MemBlkSize1::B128 => MemBlkSize::B64,
                 MemBlkSize1::B1024 => MemBlkSize::B1024,
             };
             let mem_op = MemOp {
                 src_addr: lmem_addr,
                 dst_addr: mmem_addr,
-                op_type: MMemOpType::Store,
+                op_type: MMemOpType::SCPAD2MEM,
                 blk_sz: blk_sz_ty
             };
             let ok = mem_ops.put(mem_op);
@@ -536,23 +604,23 @@ fn proc_i16(
             *use_count += 1;
             let a1 = inst.get_arg1();
             let a2 = inst.get_arg2();
-            cpu.rfile.dw[a2 as usize] = cpu.rfile.dw[a1 as usize];
+            cpu.register_file.dw[a2 as usize] = cpu.register_file.dw[a1 as usize];
         },
         Opcode::PUC => {
             *use_count += 1;
             let a1 = inst.get_arg1();
             let a2 = inst.get_imm();
-            cpu.rfile.dw[a1 as usize] = a2 as _;
+            cpu.register_file.dw[a1 as usize] = a2 as _;
         },
         Opcode::NAND => {
             *use_count += 1;
             let a1 = inst.get_arg1();
             let a2 = inst.get_arg2();
-            let a = cpu.rfile.dw[a1 as usize];
-            let b = cpu.rfile.dw[a2 as usize];
+            let a = cpu.register_file.dw[a1 as usize];
+            let b = cpu.register_file.dw[a2 as usize];
             let c = a & b;
             let d = !c;
-            cpu.rfile.dw[a1 as usize] = d;
+            cpu.register_file.dw[a1 as usize] = d;
         },
         Opcode::BSL  => {
             *use_count += 1;
@@ -560,16 +628,16 @@ fn proc_i16(
             let a2 = inst.get_arg2();
             match a2 {
                 0 => {
-                    cpu.rfile.dw[a1 as usize] =
-                        cpu.rfile.dw[a1 as usize] << 1 ;
+                    cpu.register_file.dw[a1 as usize] =
+                        cpu.register_file.dw[a1 as usize] << 1 ;
                 },
                 1 => {
-                    cpu.rfile.dw[a1 as usize] =
-                        cpu.rfile.dw[a1 as usize] << 4 ;
+                    cpu.register_file.dw[a1 as usize] =
+                        cpu.register_file.dw[a1 as usize] << 4 ;
                 },
                 2 => {
-                    cpu.rfile.dw[a1 as usize] =
-                        cpu.rfile.dw[a1 as usize] << 16 ;
+                    cpu.register_file.dw[a1 as usize] =
+                        cpu.register_file.dw[a1 as usize] << 16 ;
                 },
                 _ => unreachable!()
             }
@@ -577,18 +645,18 @@ fn proc_i16(
         Opcode::BROT => {
             *use_count += 1;
             let a1 = inst.get_arg1();
-            cpu.rfile.dw[a1 as usize] = cpu.rfile.dw[a1 as usize].reverse_bits();
+            cpu.register_file.dw[a1 as usize] = cpu.register_file.dw[a1 as usize].reverse_bits();
         },
         Opcode::TEZ => {
             *use_count += 1;
             let a1 = inst.get_arg1();
-            cpu.rfile.dw[a1 as usize] = (0 == cpu.rfile.dw[a1 as usize]) as _;
+            cpu.register_file.dw[a1 as usize] = (0 == cpu.register_file.dw[a1 as usize]) as _;
         },
         Opcode::BS => {
             *use_count += 1;
             let a1 = inst.get_arg1();
             let a2 = inst.get_arg2();
-            cpu.rfile.dw[a1 as usize] += cpu.rfile.dw[a2 as usize];
+            cpu.register_file.dw[a1 as usize] += cpu.register_file.dw[a2 as usize];
         },
         Opcode::NPUP => {
             *use_count += 1;
@@ -597,7 +665,7 @@ fn proc_i16(
         Opcode::CHKMOPS => {
             *use_count += 1;
             let reg = inst.get_arg1() as usize;
-            let addr = cpu.rfile.dw[reg];
+            let addr = cpu.register_file.dw[reg];
 
             let mut source = &mem_ops.saddr;
             let mut mask = 0;
@@ -608,15 +676,15 @@ fn proc_i16(
                 source = &mem_ops.daddr;
             }
             let finished = mask == 0;
-            cpu.rfile.dw[reg] = finished as _;
+            cpu.register_file.dw[reg] = finished as _;
         },
         Opcode::BRZ => {
             *use_count += 1;
             let addr = inst.get_arg1();
             let reg = inst.get_arg2();
-            let cond = cpu.rfile.dw[reg as usize] == 0;
+            let cond = cpu.register_file.dw[reg as usize] == 0;
             if cond {
-                cpu.rfile.dw[31] = cpu.rfile.dw[addr as usize];
+                cpu.register_file.dw[31] = cpu.register_file.dw[addr as usize];
             }
         },
         Opcode::LAV => todo!(),
@@ -763,8 +831,8 @@ fn text_xor() {
     let a = 8;
     let b = 3;
     unsafe {
-        cpu.rfile.dw[0] = a;
-        cpu.rfile.dw[1] = b;
+        cpu.register_file.dw[0] = a;
+        cpu.register_file.dw[1] = b;
     }
     let mut prg = vec![];
     for i in xor_u64(0, 1, 2) {
@@ -772,7 +840,7 @@ fn text_xor() {
     }
     prg.push(Pack::i16x4(&[Inst16::dbg_halt()]));
     let rep = run_prg(&mut cpu, prg.as_slice());
-    assert!(unsafe{ cpu.rfile.dw[0] } == a ^ b);
+    assert!(unsafe{ cpu.register_file.dw[0] } == a ^ b);
     println!("{}", rep);
 }
 #[allow(dead_code)]
@@ -792,15 +860,15 @@ fn test_and() {
     let a = 8;
     let b = 3;
     unsafe {
-        cpu.rfile.dw[0] = a;
-        cpu.rfile.dw[1] = b;
+        cpu.register_file.dw[0] = a;
+        cpu.register_file.dw[1] = b;
     }
     let mut prg = vec![];
     prg.push(and_u64(0, 1));
     prg.push(Pack::i16x4(&[Inst16::dbg_halt()]));
     let rep = run_prg(&mut cpu, prg.as_slice());
     println!("{}", rep);
-    assert!(unsafe{ cpu.rfile.dw[0] } == a & b);
+    assert!(unsafe{ cpu.register_file.dw[0] } == a & b);
 }
 
 fn gen_fibs() -> [u64;N as usize] {
@@ -888,7 +956,7 @@ fn fibs() {
     }
     let rep = run_prg(&mut cpu, prg.as_slice());
     println!("{}", rep);
-    let computed_fibs = unsafe {&cpu.lmem.dw[..(N as usize)]};
+    let computed_fibs = unsafe {&cpu.scratchpad_mem.dw[..(N as usize)]};
     let ground_truth_fibs = gen_fibs();
     assert!(computed_fibs == &ground_truth_fibs[..])
 }
@@ -902,7 +970,7 @@ fn test_fibs() {
     }
     let rep = run_prg(&mut cpu, prg.as_slice());
     println!("{}", rep);
-    let computed_fibs = unsafe {&cpu.lmem.dw[..(N as usize)]};
+    let computed_fibs = unsafe {&cpu.scratchpad_mem.dw[..(N as usize)]};
     let ground_truth_fibs = gen_fibs();
     assert!(computed_fibs == &ground_truth_fibs[..])
 }
