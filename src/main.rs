@@ -1,4 +1,5 @@
 #![feature(generic_arg_infer)]
+#![feature(new_zeroed_alloc)]
 
 use core::{mem::{size_of, transmute}, ptr::{addr_of_mut, copy_nonoverlapping}};
 
@@ -29,62 +30,73 @@ union Sracthpad {
 }
 
 const SCRATCHPAD_MEM_SIZE: usize = 1024*64;
-const EXTERNAL_MEM_SIZE: usize = 1024*1024*1;
+const EXTERNAL_MEM_SIZE: usize = 1024*1024*16;
 
 
-const ISTASH_SIZE: usize = 1024*8;
-const BUCKET_COUNT: usize = ISTASH_SIZE / size_of::<IStashCell>();
+
 type IStashCell = [u64;128];
 #[derive(Debug)]
 struct IStash {
-    cells: [IStashCell;BUCKET_COUNT],
-    bp_addrs_bits: [u64;BUCKET_COUNT],
-    counters: [u8;BUCKET_COUNT]
+    cells: [IStashCell;Self::BUCKET_COUNT],
+    ident_addr_bits: [u64;Self::BUCKET_COUNT],
+    counters: [u8;Self::BUCKET_COUNT],
+    ip_addr_bits: u64,
 }
 impl IStash {
+    const ISTASH_SIZE: usize = 1024*8;
+    const BUCKET_COUNT: usize = Self::ISTASH_SIZE / size_of::<IStashCell>();
     const DECAY_COUNT: u8 = 64;
     fn new() -> Self {
         Self {
             cells: [[0;_];_],
-            bp_addrs_bits: [u64::MAX;_],
-            counters: [0;_]
+            ident_addr_bits: [u64::MAX;_],
+            counters: [0;_],
+            ip_addr_bits: u64::MAX
         }
     }
-    fn bucket_index_from_addr(addr: usize) -> usize {
-        (addr >> 10) & !((1 << 10) - 1)
+    fn bucket_index_from_addr(addr: u64) -> u64 {
+        (addr >> 10) & ((1 << 10) - 1)
     }
-    fn addr_bits(addr: usize) -> u64 {
-        (addr >> 10) as _
+    fn addr_bits(addr: u64) -> u64 {
+        addr >> 10
     }
-    fn try_find(&mut self, addr: usize) -> Option<*const IStashCell> {
+    fn try_find(&mut self, addr: u64) -> Option<*const IStashCell> {
         let addr_bits = Self::addr_bits(addr);
-        let mut ix = 0u64;
-        for i in 0 .. BUCKET_COUNT {
-           ix |= ((self.bp_addrs_bits[i] == addr_bits) as u64) << i;
+        let guranteed_match = addr_bits == self.ip_addr_bits;
+        let bucket_ix = if guranteed_match {
+            let bucket_ix = Self::bucket_index_from_addr(addr);
+            bucket_ix as usize
+        } else {
+            let mut ix = 0u64;
+            for i in 0 .. Self::BUCKET_COUNT {
+                ix |= ((self.ident_addr_bits[i] == addr_bits) as u64) << i;
+            }
+            if ix == 0 { return None }
+            let ix = ix.trailing_zeros() as usize;
+            self.ip_addr_bits = self.ident_addr_bits[ix];
+            ix
+        };
+        for i in 0 .. Self::BUCKET_COUNT  {
+            let cv = self.counters[i] ;
+            self.counters[i] -= (i != bucket_ix && cv != 0) as u8;
         }
-        if ix == 0 { return None }
-        let ix = ix.trailing_zeros() as usize;
-        for i in 0 .. BUCKET_COUNT {
-            self.counters[i] =
-            self.counters[i].saturating_sub((i != ix) as _);
-        }
-        let bucket = &self.cells[ix];
+        let bucket = &self.cells[bucket_ix as usize];
         return Some(bucket);
     }
-    fn load(&mut self, addr: usize, src: *const IStashCell) {
+    fn load(&mut self, addr: u64, src: *const IStashCell) {
         let mut ix = 0u64;
-        for i in 0 .. BUCKET_COUNT {
+        for i in 0 .. Self::BUCKET_COUNT {
            ix |= ((self.counters[i] == 0) as u64) << i;
         }
         let no_free = ix == 0;
         let index = if no_free { // just nuke some stuff
             Self::bucket_index_from_addr(addr)
         } else { // occupy free
-            ix.trailing_zeros() as usize
-        };
-        let hash = Self::addr_bits(addr);
-        self.bp_addrs_bits[index] = hash;
-        self.counters[index] = Self::DECAY_COUNT;
+            ix.trailing_zeros() as _
+        } as usize;
+        let ident_bits = Self::addr_bits(addr);
+        self.ident_addr_bits[index as usize] = ident_bits;
+        self.counters[index as usize] = Self::DECAY_COUNT;
         unsafe {
             copy_nonoverlapping(
                 src.cast::<u8>(),
@@ -98,26 +110,37 @@ impl IStash {
 fn istash_test() {
     let mut stash = IStash::new();
     let v : IStashCell = [u64::MAX;_];
-    stash.load(1024*2, &v);
-    stash.load(1024*3, &v);
-    stash.try_find(1024*3);
-    println!("!");
+    for i in 0 .. IStash::BUCKET_COUNT {
+        stash.load((1024*i) as _, &v);
+    }
+    assert!(stash.counters.iter().map(|e|*e==64).fold(true, |acc, e|acc && e));
+    assert!(stash.ident_addr_bits.iter().zip(0u64..).fold(true, |acc, (l,r)| acc && (*l == r)));
+    for _ in 0 .. 64 {
+        let _ = stash.try_find(1024*4);
+    }
+    assert!(stash.counters.iter().zip(0..).fold(true, |acc, (e,i)| acc && if i == 4 { *e == 64 } else { *e == 0 }));
+    stash.load(1024*3, &[0;_]);
+    match stash.try_find(1024*3) {
+        Some(i) => assert!((unsafe{&*i}).iter().fold(true, |acc, e|acc && (*e == 0))),
+        None => panic!(),
+    };
+    println!("!")
 }
 
 #[repr(C)]
 struct CpuState {
     instruction_stash: Box<IStash>,
-    register_file: RegFile,
+    gp_reg_file: RegFile,
     scratchpad_mem: Box<Sracthpad>,
     external_mem: Box<ExternalMem>,
 }
 impl CpuState {
     fn new() -> Self {
         Self {
-            register_file: RegFile { dw: [0;_] },
-            scratchpad_mem: Box::new(Sracthpad { b: [0;_] }),
-            external_mem: Box::new(ExternalMem { BYTES: [0; _] }),
-            instruction_stash: Box::new(IStash::new())
+            gp_reg_file: RegFile { dw: [0;_] },
+            scratchpad_mem: unsafe { Box::new_zeroed().assume_init() },
+            external_mem: unsafe { Box::new_zeroed().assume_init() },
+            instruction_stash: Box::new(IStash::new()),
         }
     }
 }
@@ -135,7 +158,7 @@ enum Opcode {
     STS, // store segment from scpad to main
     LAV, // loads a value from gmem to a specified reg and atomically sets an ownership flag returning it in a specified register.
     STAV, // tries to atomically store a value in specified register into memory to gmem, and returns a flag in specified register denoting if this operation succeded or not
-    PUC, // put 5 bit constant into register
+    PUC, // put 6 bit constant into register
     CPY, // reg2reg copy
 
     TEZ, // test equiv to zero
@@ -145,14 +168,19 @@ enum Opcode {
     BS, // bitwise summ
     BRZ, // branch if zero
 
-    CHKMOPS, // checks if issued load or store gmem-scpaf operation on specific segment has finished
+    CHKMOPS, // checks if issued load or store gmem-scpad operation on specific segment has finished
 
     NPUP, // indicates how to split next pack into constituents
+
+    NSDINP, // next N packs do not have serialising dependencies
 
     DBG_HALT,
 
 
-    LIMIT = 31,
+    I_EXT_32 = 30,
+    I_EXT_64 = 31,
+
+    LIMIT = 32,
 }
 
 #[derive(Debug, Clone, Copy)] #[repr(transparent)]
@@ -206,7 +234,7 @@ impl Inst16 {
         assert!(src < 32 && op < 32);
         Self(Opcode::BS as u16 | ((src as u16) << 5) | ((op as u16) << 10))
     }
-    fn bsl(src: u8, op: ShiftType) -> Self {
+    fn bsl(src: u8, op: ShiftLength) -> Self {
         assert!(src < 32);
         Self(Opcode::BSL as u16 | ((src as u16) << 5) | ((op as u16) << 10))
     }
@@ -260,7 +288,7 @@ impl Inst16 {
 
 #[allow(dead_code)]
 #[repr(u8)] #[derive(Debug, Clone, Copy)]
-enum ShiftType {
+enum ShiftLength {
     S1, S4, S16
 }
 
@@ -283,7 +311,7 @@ impl Pack {
 
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
-enum MMemOpType {
+enum MMemTransDir {
     SCPAD2MEM, MEM2SCPAD
 }
 #[derive(Debug)]
@@ -291,13 +319,13 @@ struct MemOp {
     src_addr: u64,
     dst_addr: u64,
     blk_sz: MemBlkSize,
-    op_type: MMemOpType
+    op_type: MMemTransDir
 }
 #[allow(dead_code)]
 #[repr(u8)]
 #[derive(Debug)]
 enum MemBlkSize1 {
-    B128 = 0, B1024 = 1
+    B64 = 0, B1024 = 1
 }
 #[allow(dead_code)]
 #[repr(u8)]
@@ -319,7 +347,7 @@ enum MemBlkSize {
 struct MemCtrl {
     delay_count: [u8;16],
     blk_sz: [MemBlkSize;16],
-    op_type: [MMemOpType;16],
+    op_type: [MMemTransDir;16],
     saddr: [u64;16],
     daddr: [u64;16],
     occupation_map: u16,
@@ -328,7 +356,7 @@ impl MemCtrl {
     fn new() -> Self {
         MemCtrl {
             blk_sz: [MemBlkSize::B256;_],
-            op_type: [MMemOpType::SCPAD2MEM;_],
+            op_type: [MMemTransDir::SCPAD2MEM;_],
             saddr: [0;_],
             daddr: [0;_],
             occupation_map: 0,
@@ -366,11 +394,11 @@ impl MemCtrl {
                 let src_ptr ;
                 let dst_ptr ;
                 match self.op_type[ix] {
-                    MMemOpType::MEM2SCPAD => {
+                    MMemTransDir::MEM2SCPAD => {
                         src_ptr = cpu.external_mem.BYTES.as_ptr().add(src as usize);
                         dst_ptr = cpu.scratchpad_mem.b.as_mut_ptr().add(dst as usize);
                     },
-                    MMemOpType::SCPAD2MEM => {
+                    MMemTransDir::SCPAD2MEM => {
                         src_ptr = cpu.scratchpad_mem.b.as_ptr().add(src as usize);
                         dst_ptr = cpu.external_mem.BYTES.as_mut_ptr().add(dst as usize);
                     }
@@ -401,7 +429,7 @@ impl MemCtrl {
     }
 }
 
-fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
+fn run_programm(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
 
     let byte_len = prg_bytes.len() * 8;
     let dst = state.external_mem.BYTES.as_mut_ptr().cast::<u8>();
@@ -411,9 +439,9 @@ fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
         byte_len
     );
 
-    let mut stop = false;
+    let mut was_asked_to_stop = false;
     let mut mem_deps = MemCtrl::new();
-    let mut cycle_count = 0;
+    let mut instruction_cycle_count = 0;
     let mut noops_count = 0;
     let mut usefull_count = 0;
     let mut i_cache_miss_count = 0;
@@ -422,7 +450,7 @@ fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
 
     let mut decode_pattern = 0u8;
     loop {
-        let ip = state.register_file.dw[31];
+        let ip = state.gp_reg_file.dw[31];
         let blob = match  state.instruction_stash.try_find(ip as _) {
             Some(blob) => { // hit
                 i_cache_hit_count += 1;
@@ -433,13 +461,13 @@ fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
                 let block_addr = ip & !((1 << 10) - 1);
                 let src = &state.external_mem.IMEM[block_addr as usize];
                 state.instruction_stash.load(ip as _, src);
-                cache_fill_stall += 100; // do it better
+                cache_fill_stall += 100; // sorta stall on instruction mem fil
                 continue;
             },
         };
         let pack_ix = ip >> 3;
         let pack = *blob.cast::<u64>().add(pack_ix as _);
-        state.register_file.dw[31] += 8; // todo: change to allow jumps to arbitrary instructions
+        state.gp_reg_file.dw[31] += 8; // todo: change to allow jumps to arbitrary instructions
 
         let mut slam_pack = 0;
         if decode_pattern != 0 {
@@ -455,11 +483,11 @@ fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
                     let pack = if slam_pack != 0 { slam_pack } else { pack };
                     let mut pack = pack & mask;
                     let [i1, i2, i3, i4] = transmute::<_, &mut [Inst16;4]>(&mut pack);
-                    proc_i16(i1, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                    proc_i16(i2, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                    proc_i16(i3, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                    proc_i16(i4, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                    cycle_count += 1;
+                    proc_i16(i1, &mut was_asked_to_stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                    proc_i16(i2, &mut was_asked_to_stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                    proc_i16(i3, &mut was_asked_to_stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                    proc_i16(i4, &mut was_asked_to_stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                    instruction_cycle_count += 1;
                     mem_deps.check_mem_deps(state);
                     if pack != 0 {
                         slam_pack = pack;
@@ -479,11 +507,11 @@ fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
             loop {
                 let mut pack = if slam_pack != 0 { slam_pack } else { pack };
                 let [i1, i2, i3, i4] = transmute::<_, &mut [Inst16;4]>(&mut pack);
-                proc_i16(i1, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                proc_i16(i2, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                proc_i16(i3, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                proc_i16(i4, &mut stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
-                cycle_count += 1;
+                proc_i16(i1, &mut was_asked_to_stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                proc_i16(i2, &mut was_asked_to_stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                proc_i16(i3, &mut was_asked_to_stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                proc_i16(i4, &mut was_asked_to_stop, state, &mut mem_deps, &mut noops_count, &mut decode_pattern, &mut usefull_count);
+                instruction_cycle_count += 1;
                 mem_deps.check_mem_deps(state);
                 if pack != 0 {
                     slam_pack = pack;
@@ -492,19 +520,19 @@ fn run_prg(state: &mut CpuState, prg_bytes: &[Pack]) -> String { unsafe {
                 break;
             }
         }
-        if stop { break; }
+        if was_asked_to_stop { break; }
     }
 
     let mut report = String::new();
     use core::fmt::Write;
     let usefull = usefull_count;
-    let ipc_rate = usefull as f32 / cycle_count as f32;
+    let ipc_rate = usefull as f32 / instruction_cycle_count as f32;
     let total_instruction_count = usefull + noops_count;
     let sparcity = (noops_count as f32 / total_instruction_count as f32) * 100.0;
+    let total_cycle_count = instruction_cycle_count + cache_fill_stall;
 
-    writeln!(&mut report,
-        "Executed total of {total_instruction_count} instructions.\n{usefull} usefull and {noops_count} noops in {cycle_count} cycles (~{ipc_rate:.1} average IPC rate) (~{sparcity:.1}% average sparsity)"
-    ).unwrap();
+    writeln!(&mut report, "Executed total of {total_instruction_count} instructions in {total_cycle_count} cycles").unwrap();
+    writeln!(&mut report, "{usefull} usefull and {noops_count} noops in {instruction_cycle_count} cycles (~{ipc_rate:.1} average IPC rate) (~{sparcity:.1}% average sparsity)").unwrap();
     writeln!(&mut report, "{cache_fill_stall} cycles spent stalled on instruction stash fill").unwrap();
     writeln!(&mut report, "Experienced {i_cache_miss_count} misses and {i_cache_hit_count} hits on i$ during execution").unwrap();
     writeln!(&mut report, "Programm size was {} bytes", byte_len).unwrap();
@@ -532,44 +560,44 @@ fn proc_i16(
         Opcode::LDV => {
             *use_count += 1;
             let sr = inst.get_arg1();
-            let src_addr = cpu.register_file.dw[sr as usize];
+            let src_addr = cpu.gp_reg_file.dw[sr as usize];
             let val = if src_addr < 1 << 48 {
                 *cpu.scratchpad_mem.dw.as_ptr().cast::<u8>().add(src_addr as usize).cast::<u64>()
             } else {
                 0
             };
             let dst = inst.get_arg2();
-            cpu.register_file.dw[dst as usize] = val;
+            cpu.gp_reg_file.dw[dst as usize] = val;
         },
         Opcode::STV => {
             *use_count += 1;
             let dar = inst.get_arg1();
-            let dst_addr = cpu.register_file.dw[dar as usize];
+            let dst_addr = cpu.gp_reg_file.dw[dar as usize];
             if dst_addr < 1 << 48 {
                 let vr = inst.get_arg2();
-                let val = cpu.register_file.dw[vr as usize];
+                let val = cpu.gp_reg_file.dw[vr as usize];
                 cpu.scratchpad_mem.dw.as_mut_ptr().cast::<u8>().add(dst_addr as usize).cast::<u64>().write(val);
             }
         },
         Opcode::LDS => {
             *use_count += 1;
             let mmem_addr_r = inst.get_arg1();
-            let mmem_addr = cpu.register_file.dw[mmem_addr_r as usize];
+            let mmem_addr = cpu.gp_reg_file.dw[mmem_addr_r as usize];
             if mmem_addr >= 1 << 48 {
                 *inst = Inst16::dno();
                 return
             }
             let lmem_addr_r = inst.get_arg2();
-            let lmem_addr = cpu.register_file.dw[lmem_addr_r as usize];
+            let lmem_addr = cpu.gp_reg_file.dw[lmem_addr_r as usize];
             let mem_op_ty = inst.get_mem_size();
             let blk_sz_ty = match mem_op_ty {
-                MemBlkSize1::B128 => MemBlkSize::B64,
+                MemBlkSize1::B64 => MemBlkSize::B64,
                 MemBlkSize1::B1024 => MemBlkSize::B1024,
             };
             let mem_op = MemOp {
                 src_addr: mmem_addr,
                 dst_addr: lmem_addr,
-                op_type: MMemOpType::MEM2SCPAD,
+                op_type: MMemTransDir::MEM2SCPAD,
                 blk_sz: blk_sz_ty
             };
             let ok = mem_ops.put(mem_op);
@@ -579,21 +607,21 @@ fn proc_i16(
         Opcode::STS => {
             *use_count += 1;
             let lmem_addr_r = inst.get_arg1();
-            let lmem_addr = cpu.register_file.dw[lmem_addr_r as usize];
+            let lmem_addr = cpu.gp_reg_file.dw[lmem_addr_r as usize];
             if lmem_addr >= 1 << 48 {
                 *inst = Inst16::dno();
                 return;
             }
             let mmem_addr_r = inst.get_arg2();
-            let mmem_addr = cpu.register_file.dw[mmem_addr_r as usize];
+            let mmem_addr = cpu.gp_reg_file.dw[mmem_addr_r as usize];
             let blk_sz_ty = match inst.get_mem_size() {
-                MemBlkSize1::B128 => MemBlkSize::B64,
+                MemBlkSize1::B64 => MemBlkSize::B64,
                 MemBlkSize1::B1024 => MemBlkSize::B1024,
             };
             let mem_op = MemOp {
                 src_addr: lmem_addr,
                 dst_addr: mmem_addr,
-                op_type: MMemOpType::SCPAD2MEM,
+                op_type: MMemTransDir::SCPAD2MEM,
                 blk_sz: blk_sz_ty
             };
             let ok = mem_ops.put(mem_op);
@@ -604,23 +632,23 @@ fn proc_i16(
             *use_count += 1;
             let a1 = inst.get_arg1();
             let a2 = inst.get_arg2();
-            cpu.register_file.dw[a2 as usize] = cpu.register_file.dw[a1 as usize];
+            cpu.gp_reg_file.dw[a2 as usize] = cpu.gp_reg_file.dw[a1 as usize];
         },
         Opcode::PUC => {
             *use_count += 1;
             let a1 = inst.get_arg1();
             let a2 = inst.get_imm();
-            cpu.register_file.dw[a1 as usize] = a2 as _;
+            cpu.gp_reg_file.dw[a1 as usize] = a2 as _;
         },
         Opcode::NAND => {
             *use_count += 1;
             let a1 = inst.get_arg1();
             let a2 = inst.get_arg2();
-            let a = cpu.register_file.dw[a1 as usize];
-            let b = cpu.register_file.dw[a2 as usize];
+            let a = cpu.gp_reg_file.dw[a1 as usize];
+            let b = cpu.gp_reg_file.dw[a2 as usize];
             let c = a & b;
             let d = !c;
-            cpu.register_file.dw[a1 as usize] = d;
+            cpu.gp_reg_file.dw[a1 as usize] = d;
         },
         Opcode::BSL  => {
             *use_count += 1;
@@ -628,16 +656,16 @@ fn proc_i16(
             let a2 = inst.get_arg2();
             match a2 {
                 0 => {
-                    cpu.register_file.dw[a1 as usize] =
-                        cpu.register_file.dw[a1 as usize] << 1 ;
+                    cpu.gp_reg_file.dw[a1 as usize] =
+                        cpu.gp_reg_file.dw[a1 as usize] << 1 ;
                 },
                 1 => {
-                    cpu.register_file.dw[a1 as usize] =
-                        cpu.register_file.dw[a1 as usize] << 4 ;
+                    cpu.gp_reg_file.dw[a1 as usize] =
+                        cpu.gp_reg_file.dw[a1 as usize] << 4 ;
                 },
                 2 => {
-                    cpu.register_file.dw[a1 as usize] =
-                        cpu.register_file.dw[a1 as usize] << 16 ;
+                    cpu.gp_reg_file.dw[a1 as usize] =
+                        cpu.gp_reg_file.dw[a1 as usize] << 16 ;
                 },
                 _ => unreachable!()
             }
@@ -645,18 +673,18 @@ fn proc_i16(
         Opcode::BROT => {
             *use_count += 1;
             let a1 = inst.get_arg1();
-            cpu.register_file.dw[a1 as usize] = cpu.register_file.dw[a1 as usize].reverse_bits();
+            cpu.gp_reg_file.dw[a1 as usize] = cpu.gp_reg_file.dw[a1 as usize].reverse_bits();
         },
         Opcode::TEZ => {
             *use_count += 1;
             let a1 = inst.get_arg1();
-            cpu.register_file.dw[a1 as usize] = (0 == cpu.register_file.dw[a1 as usize]) as _;
+            cpu.gp_reg_file.dw[a1 as usize] = (0 == cpu.gp_reg_file.dw[a1 as usize]) as _;
         },
         Opcode::BS => {
             *use_count += 1;
             let a1 = inst.get_arg1();
             let a2 = inst.get_arg2();
-            cpu.register_file.dw[a1 as usize] += cpu.register_file.dw[a2 as usize];
+            cpu.gp_reg_file.dw[a1 as usize] += cpu.gp_reg_file.dw[a2 as usize];
         },
         Opcode::NPUP => {
             *use_count += 1;
@@ -665,7 +693,7 @@ fn proc_i16(
         Opcode::CHKMOPS => {
             *use_count += 1;
             let reg = inst.get_arg1() as usize;
-            let addr = cpu.register_file.dw[reg];
+            let addr = cpu.gp_reg_file.dw[reg];
 
             let mut source = &mem_ops.saddr;
             let mut mask = 0;
@@ -676,20 +704,23 @@ fn proc_i16(
                 source = &mem_ops.daddr;
             }
             let finished = mask == 0;
-            cpu.register_file.dw[reg] = finished as _;
+            cpu.gp_reg_file.dw[reg] = finished as _;
         },
         Opcode::BRZ => {
             *use_count += 1;
             let addr = inst.get_arg1();
             let reg = inst.get_arg2();
-            let cond = cpu.register_file.dw[reg as usize] == 0;
+            let cond = cpu.gp_reg_file.dw[reg as usize] == 0;
             if cond {
-                cpu.register_file.dw[31] = cpu.register_file.dw[addr as usize];
+                cpu.gp_reg_file.dw[31] = cpu.gp_reg_file.dw[addr as usize];
             }
         },
         Opcode::LAV => todo!(),
         Opcode::STAV => todo!(),
         Opcode::LIMIT => panic!("Invalid instruction"),
+        Opcode::NSDINP => todo!(),
+        Opcode::I_EXT_32 => todo!(),
+        Opcode::I_EXT_64 => todo!(),
     }
     *inst = Inst16::dno();
 } }
@@ -766,11 +797,12 @@ fn nand_puter() {
         }
         return a;
     }
-    for k in 0 .. u16::MAX {
-        let l = u16::MAX - k;
-        let c = add(k, l);
-        let g = k + l;
-        assert!(g == c);
+    for k in 0 .. 1024 {
+        for l in 0 .. 1024 {
+            let c = add(k, l);
+            let g = k + l;
+            assert!(g == c);
+        }
     }
     fn bet(a:u16, b:u16) -> u16 {
         // a == b
@@ -831,16 +863,16 @@ fn text_xor() {
     let a = 8;
     let b = 3;
     unsafe {
-        cpu.register_file.dw[0] = a;
-        cpu.register_file.dw[1] = b;
+        cpu.gp_reg_file.dw[0] = a;
+        cpu.gp_reg_file.dw[1] = b;
     }
     let mut prg = vec![];
     for i in xor_u64(0, 1, 2) {
         prg.push(i);
     }
     prg.push(Pack::i16x4(&[Inst16::dbg_halt()]));
-    let rep = run_prg(&mut cpu, prg.as_slice());
-    assert!(unsafe{ cpu.register_file.dw[0] } == a ^ b);
+    let rep = run_programm(&mut cpu, prg.as_slice());
+    assert!(unsafe{ cpu.gp_reg_file.dw[0] } == a ^ b);
     println!("{}", rep);
 }
 #[allow(dead_code)]
@@ -860,15 +892,15 @@ fn test_and() {
     let a = 8;
     let b = 3;
     unsafe {
-        cpu.register_file.dw[0] = a;
-        cpu.register_file.dw[1] = b;
+        cpu.gp_reg_file.dw[0] = a;
+        cpu.gp_reg_file.dw[1] = b;
     }
     let mut prg = vec![];
     prg.push(and_u64(0, 1));
     prg.push(Pack::i16x4(&[Inst16::dbg_halt()]));
-    let rep = run_prg(&mut cpu, prg.as_slice());
+    let rep = run_programm(&mut cpu, prg.as_slice());
     println!("{}", rep);
-    assert!(unsafe{ cpu.register_file.dw[0] } == a & b);
+    assert!(unsafe{ cpu.gp_reg_file.dw[0] } == a & b);
 }
 
 fn gen_fibs() -> [u64;N as usize] {
@@ -900,7 +932,7 @@ fn fib() -> [Pack;12] {
             Inst16::puc(5, 0), // loop counter
             Inst16::puc(6, 1), // bump counter
             Inst16::puc(7, 44),
-            Inst16::bsl(7, ShiftType::S1),
+            Inst16::bsl(7, ShiftLength::S1),
         ]),
         // loop
         Pack::i16x4(&[
@@ -954,7 +986,7 @@ fn fibs() {
     for p in fib() {
         prg.push(p)
     }
-    let rep = run_prg(&mut cpu, prg.as_slice());
+    let rep = run_programm(&mut cpu, prg.as_slice());
     println!("{}", rep);
     let computed_fibs = unsafe {&cpu.scratchpad_mem.dw[..(N as usize)]};
     let ground_truth_fibs = gen_fibs();
@@ -963,14 +995,45 @@ fn fibs() {
 
 #[test]
 fn test_fibs() {
-    let mut cpu = CpuState::new();
-    let mut prg = vec![];
-    for p in fib() {
-        prg.push(p)
+    fibs()
+}
+
+#[allow(dead_code)]
+fn ctz(num: u32) -> usize {
+    let mut res = 0;
+    let n = (num & u32::MAX) == 0;
+    let rem = if n {
+        res += 32;
+        return res;
+    } else {
+        let n = (num & ((1 << 16) - 1)) == 0;
+        if n {
+            res += 16;
+            16
+        } else {
+            let n = (num & ((1 << 8) - 1)) == 0;
+            if n {
+                res += 8;
+                8
+            } else {
+                0
+            }
+        }
+    };
+    for i in 0 .. (32 - rem) {
+        let n = i + rem;
+        let one = (num & (1 << n)) != 0;
+        if one { break }
+        res += 1;
     }
-    let rep = run_prg(&mut cpu, prg.as_slice());
-    println!("{}", rep);
-    let computed_fibs = unsafe {&cpu.scratchpad_mem.dw[..(N as usize)]};
-    let ground_truth_fibs = gen_fibs();
-    assert!(computed_fibs == &ground_truth_fibs[..])
+    return res;
+}
+
+#[test]
+fn ctz_test() {
+    for i in 0 .. 31 {
+        let num = 1 << i;
+        let res = ctz(num);
+        assert!(res == i)
+    }
 }
